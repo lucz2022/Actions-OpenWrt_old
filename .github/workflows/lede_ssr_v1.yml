@@ -89,6 +89,25 @@ jobs:
         cd openwrt
         curl -sSL https://raw.githubusercontent.com/chenmozhijin/turboacc/luci/add_turboacc.sh -o add_turboacc.sh
         bash add_turboacc.sh
+    - name: Force libpcre (not pcre2) & prebuild PCRE
+      run: |
+        cd openwrt
+        # 1) 强制使用旧版 libpcre，禁用 pcre2
+        sed -i 's/^CONFIG_PACKAGE_libpcre2=y/# CONFIG_PACKAGE_libpcre2 is not set/' .config || true
+        grep -q '^CONFIG_PACKAGE_libpcre=y' .config || echo 'CONFIG_PACKAGE_libpcre=y' >> .config
+        make defconfig
+
+        # 2) 预编 PCRE，避免 configure 阶段找不到交叉环境的 pcre
+        if [ -d package/libs/pcre ]; then
+          make package/pcre/{clean,compile} V=s
+        else
+          # 兼容某些分支/feeds 的路径
+          make package/feeds/packages/pcre/{clean,compile} V=s || true
+        fi
+
+        # 3) 清理一下 ss-libev，防缓存脏
+        make package/feeds/packages/shadowsocks-libev/clean || true
+
     - name: Load custom configuration
       run: |
         [ -e files ] && mv files openwrt/files
