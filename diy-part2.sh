@@ -32,4 +32,8 @@ fi
 # 确保 Go 工具链主机端已准备好
 make package/golang/host/compile V=s
 
+cd openwrt
+sed -i 's/^CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_MosDNS=y/# CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_MosDNS is not set/' .config || true
+sed -i 's/^CONFIG_PACKAGE_mosdns=y/# CONFIG_PACKAGE_mosdns is not set/' .config || true
 make defconfig
+
