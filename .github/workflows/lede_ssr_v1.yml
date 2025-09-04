@@ -89,7 +89,18 @@ jobs:
         cd openwrt
         curl -sSL https://raw.githubusercontent.com/chenmozhijin/turboacc/luci/add_turboacc.sh -o add_turboacc.sh
         bash add_turboacc.sh
-
+        
+    - name: Ensure ucode-mod-digest present
+      run: |
+        cd openwrt
+        # 确保索引最新
+        ./scripts/feeds update -a
+        ./scripts/feeds install -a
+        # 强制选择 ucode 及其 digest 模块（homeproxy 依赖它）
+        ./scripts/config -e CONFIG_PACKAGE_ucode
+        ./scripts/config -e CONFIG_PACKAGE_ucode-mod-digest
+        make defconfig
+        
     - name: Load custom configuration
       run: |
         [ -e files ] && mv files openwrt/files
