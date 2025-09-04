@@ -5,7 +5,9 @@
 # ================================================
 
 set -eux
-cd openwrt
+
+# 如果不在 openwrt/，就自动切换
+[ -d openwrt ] && cd openwrt
 
 # 确保存在 .config
 [ -f .config ] || touch .config
