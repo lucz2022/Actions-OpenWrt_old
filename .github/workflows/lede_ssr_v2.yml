@@ -97,13 +97,19 @@ jobs:
         chmod +x $DIY_P2_SH
         cd openwrt
         $GITHUB_WORKSPACE/$DIY_P2_SH
-    - name: Guard: forbid ss-libev being pulled
+
+    - name: "Guard: forbid ss-libev being pulled"
+      shell: bash
       run: |
-        cd openwrt && make defconfig
+        set -euo pipefail
+        cd openwrt
+        make defconfig
         if grep -qE 'CONFIG_PACKAGE_shadowsocks-libev-ss-(local|redir|tunnel)=y|CONFIG_PACKAGE_luci-app-(ssr-plus|bypass|passwall|passwall2)_INCLUDE_Shadowsocks_Libev(_Client|_Server)?=y' .config; then
-          echo "::error ::shadowsocks-libev 被 feed 默认启用/联动拉入，请关闭相应 INCLUDE 或改为 SSRR/Xray"
+          echo "::error ::shadowsocks-libev 被 feed 默认启用或联动拉入，请关闭对应 INCLUDE_Shadowsocks_Libev* 选项（或改用 SSRR/Xray）"
           exit 1
         fi
+
+
 
     - name: Prepare tmp and dl
       run: |
