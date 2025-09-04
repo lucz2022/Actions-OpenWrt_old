@@ -97,34 +97,7 @@ jobs:
         chmod +x $DIY_P2_SH
         cd openwrt
         $GITHUB_WORKSPACE/$DIY_P2_SH
-            - name: Load custom configuration
-
-    # === 在此处插入 Prebuild PCRE(1)（只在选了 ss-libev 时执行） ===
-    - name: Prebuild PCRE (only if ss-libev is selected)
-      run: |
-        set -e
-        cd openwrt
-        # 展开一次，确保 .config 生效
-        make defconfig
-
-        # 如果 ss-libev 被选择或被包含，就启用并预编 libpcre
-        if grep -qE 'CONFIG_PACKAGE_shadowsocks-libev-ss-(local|redir|tunnel)=y|CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_Shadowsocks_Libev(_Client|_Server)?=y' .config; then
-          echo "[info] ss-libev detected; enabling PCRE1 and prebuilding ..."
-          # 确保 libpcre=y（PCRE1，不是 pcre2）
-          sed -i '/^# CONFIG_PACKAGE_libpcre is not set/d' .config || true
-          grep -q '^CONFIG_PACKAGE_libpcre=y' .config || echo 'CONFIG_PACKAGE_libpcre=y' >> .config
-          make defconfig
-
-          # 预编 PCRE1 到 target staging_dir
-          make package/libs/pcre/{clean,compile} V=s
-
-          # 简单校验
-          ls -l staging_dir/target-*/usr/include/pcre.h || (echo "pcre.h not found"; exit 1)
-          ls -l staging_dir/target-*/usr/lib/libpcre.*  || (echo "libpcre.* not found"; exit 1)
-        else
-          echo "[info] ss-libev not selected; skip PCRE prebuild."
-        fi
-
+    
     - name: Prepare tmp and dl
       run: |
         sudo mkdir -p /workdir/tmp /workdir/dl
