@@ -143,10 +143,16 @@ jobs:
       id: organize
       if: env.UPLOAD_FIRMWARE == 'true' && !cancelled()
       run: |
-        cd openwrt/bin/targets/*/*
-        rm -rf packages
-        echo "FIRMWARE=$PWD" >> $GITHUB_ENV
-        echo "status=success" >> $GITHUB_OUTPUT
+        set -e
+        if ls openwrt/bin/targets/*/* >/dev/null 2>&1; then
+          cd openwrt/bin/targets/*/*
+          rm -rf packages
+          echo "FIRMWARE=$PWD" >> $GITHUB_ENV
+          echo "status=success" >> $GITHUB_OUTPUT
+        else
+          echo "No targets output found."
+          echo "status=skip" >> $GITHUB_OUTPUT
+        fi
 
     - name: Upload firmware directory
       uses: actions/upload-artifact@main
