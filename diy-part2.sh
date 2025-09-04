@@ -17,5 +17,19 @@ cat >> .config <<'EOF'
 # CONFIG_PACKAGE_shadowsocks-libev-ss-server is not set
 # CONFIG_PACKAGE_shadowsocks-libev-ss-tunnel is not set
 EOF
+cd openwrt
+
+# 找到 small 源里的 mosdns Makefile（路径可能是 feeds/small/mosdns/Makefile）
+MOSDNS_MK=$(grep -Rwl --include=Makefile -e '^.*mosdns' feeds 2>/dev/null | head -n1)
+if [ -n "$MOSDNS_MK" ]; then
+  echo "[patch] Fix mosdns CGO/linkmode in $MOSDNS_MK"
+  # 1) 开启 CGO
+  sed -i -e 's/\bCGO_ENABLED=0\b/CGO_ENABLED=1/' "$MOSDNS_MK"
+  # 2) （可选）如果 Makefile 里硬塞了 -linkmode external，直接去掉
+  sed -i -e 's/-linkmode[[:space:]]\+external//g' "$MOSDNS_MK"
+fi
+
+# 确保 Go 工具链主机端已准备好
+make package/golang/host/compile V=s
 
 make defconfig
