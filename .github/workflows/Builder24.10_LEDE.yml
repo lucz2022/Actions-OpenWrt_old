@@ -18,7 +18,7 @@ on:
 
 env:
   REPO_URL: https://github.com/openwrt/openwrt
-  REPO_BRANCH: openwrt-24.10   # 这是分支名，没问题；若固定版本则用 v23.05.5（tag
+  REPO_BRANCH: openwrt-23.05   # 这是分支名，没问题；若固定版本则用 v23.05.5（tag）
   FEEDS_CONF: feeds.conf.default
   CONFIG_FILE: lu.config
   DIY_P1_SH: diy-part1.sh
