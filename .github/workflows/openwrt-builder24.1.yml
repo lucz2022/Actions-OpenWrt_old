@@ -20,7 +20,7 @@ env:
   REPO_URL: https://github.com/openwrt/openwrt
   REPO_BRANCH: openwrt-24.10   # 这是分支名，没问题；若固定版本则用 v23.05.5（tag
   FEEDS_CONF: feeds.conf.default
-  CONFIG_FILE: openwrt241.config
+  CONFIG_FILE: clash.config
   DIY_P1_SH: diy-part1.sh
   DIY_P2_SH: diy-part2.sh
   UPLOAD_BIN_DIR: false
