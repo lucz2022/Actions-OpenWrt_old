@@ -38,6 +38,9 @@ sed -i 's/^CONFIG_DEFAULT_dnsmasq=y/# CONFIG_DEFAULT_dnsmasq is not set/' "$CFG"
 sed -i 's/^CONFIG_PACKAGE_dnsmasq=y/# CONFIG_PACKAGE_dnsmasq is not set/' "$CFG" || true
 sed -i 's/^CONFIG_PACKAGE_dnsmasq-dhcpv6=y/# CONFIG_PACKAGE_dnsmasq-dhcpv6 is not set/' "$CFG" || true
 grep -q '^CONFIG_PACKAGE_dnsmasq-full=y' "$CFG" || echo 'CONFIG_PACKAGE_dnsmasq-full=y' >> "$CFG"
+sed -i 's/^CONFIG_PACKAGE_yggdrasil=y/# CONFIG_PACKAGE_yggdrasil is not set/' ./.config
+sed -i 's/^CONFIG_PACKAGE_luci-proto-yggdrasil=y/# CONFIG_PACKAGE_luci-proto-yggdrasil is not set/' ./.config
+sed -i 's/^CONFIG_PACKAGE_yggdrasil-jumper=y/# CONFIG_PACKAGE_yggdrasil-jumper is not set/' ./.config
 
 # 4) 关闭一切会触发 Rust 的包 + LuCI 包含项
 RUST_TRIGGERS=(tuic-client tuic-server shadow-tls
