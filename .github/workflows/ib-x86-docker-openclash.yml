@@ -1,18 +1,23 @@
-name: IB x86_64 + Docker + OpenClash runtime
+name: IB x86_64 (Docker + OpenClash runtime + Offload)
 
 on:
   workflow_dispatch:
 
 env:
-  # ===== 版本/目标设置 =====
-  OWRT_TREE: snapshots              # snapshots（推荐）或 releases/24.10.0
+  # ===== 路径/目标 =====
+  OWRT_TREE: snapshots          # 用 snapshots；要稳定版可改成 releases/24.10.1
   TARGET: x86
   SUBTARGET: 64
-  PROFILES: "generic generic-efi"   # 同时打 BIOS/UEFI；只要其一就留一个
+  PROFILES: "generic generic-efi"    # 同时打 BIOS/UEFI；只要其一就删掉另一个
   TZ: Asia/Shanghai
 
-  # ===== 关键：一行包清单（空格分隔，不换行）=====
-  PACKAGES: "dnsmasq-full -dnsmasq -dnsmasq-dhcpv6 firewall4 nftables iptables-nft kmod-nf-conntrack kmod-nf-nat kmod-nft-nat kmod-nft-tproxy kmod-nft-socket kmod-nft-offload kmod-tun kmod-inet-diag ca-bundle ca-certificates curl wget-ssl unzip bash coreutils-nohup ip-full luci luci-compat luci-app-firewall kmod-igc dockerd docker containerd kmod-bridge kmod-veth kmod-br-netfilter kmod-fs-overlay kmod-fs-ext4 luci-app-dockerman luci-i18n-dockerman-zh-cn irqbalance ethtool"
+  # ===== 一行包清单（不要换行）=====
+  # - OpenClash 运行环境（fw4/nft/tproxy/dnsmasq-full 等）
+  # - Docker（dockerd/containerd/内核模块 + Dockerman）
+  # - I226 驱动（kmod-igc）
+  # - PVE/KVM VirtIO & Hyper-V 驱动
+  # - 官方加速（kmod-nft-offload + 开机自动开启，见下方 FILES）
+  PACKAGES: "dnsmasq-full -dnsmasq -dnsmasq-dhcpv6 firewall4 nftables iptables-nft kmod-nf-conntrack kmod-nf-nat kmod-nft-nat kmod-nft-tproxy kmod-nft-socket kmod-nft-offload kmod-tun kmod-inet-diag ca-bundle ca-certificates curl wget-ssl unzip bash coreutils-nohup ip-full luci luci-compat luci-app-firewall kmod-igc dockerd docker containerd kmod-bridge kmod-veth kmod-br-netfilter kmod-fs-overlay kmod-fs-ext4 luci-app-dockerman luci-i18n-dockerman-zh-cn irqbalance ethtool kmod-virtio kmod-virtio-net kmod-virtio-blk kmod-virtio-scsi kmod-virtio-console kmod-balloon kmod-hv-vmbus kmod-hv-netvsc kmod-hv-storvsc"
 
 jobs:
   build:
@@ -26,38 +31,46 @@ jobs:
         shell: bash
         run: |
           sudo -E apt-get -qq update
-          sudo -E apt-get -qq install -y build-essential qemu-utils libncurses5 ca-certificates wget xz-utils unzip python3
+          sudo -E apt-get -qq install -y ca-certificates curl xz-utils zstd tar coreutils
           sudo timedatectl set-timezone "$TZ"
           df -hT
 
-      - name: Download ImageBuilder
-        id: dl
+      - name: Download ImageBuilder (.tar.zst, auto-detect)
         shell: bash
         run: |
           set -e
-          base="https://downloads.openwrt.org/${OWRT_TREE}/targets/${TARGET}/${SUBTARGET}"
-          # snapshots 文件名
-          ib_tar="openwrt-imagebuilder-${TARGET}-${SUBTARGET}.Linux-x86_64.tar.xz"
-          # 如果你改 env.OWRT_TREE 为 releases/24.10.0，请把上面改成：
-          # ib_tar="openwrt-imagebuilder-24.10.0-${TARGET}-${SUBTARGET}.Linux-x86_64.tar.xz"
-          echo "Download: ${base}/${ib_tar}"
-          wget -q "${base}/${ib_tar}"
-          tar -xJf "${ib_tar}"
-          ib_dir=$(tar -tf "${ib_tar}" | head -1 | cut -d/ -f1)
-          echo "IB_DIR=${ib_dir}" >> $GITHUB_ENV
+          BASE="https://downloads.openwrt.org/${OWRT_TREE}/targets/${TARGET}/${SUBTARGET}"
+          echo "Base: $BASE"
+          IB_FILE="$(curl -fsSL "$BASE/" | grep -o 'openwrt-imagebuilder-[^"]*Linux-x86_64\.tar\.zst' | head -n1)"
+          test -n "$IB_FILE" || { echo "No ImageBuilder .tar.zst found on $BASE"; exit 8; }
+          echo "Downloading: $BASE/$IB_FILE"
+          curl -fL --retry 5 --retry-delay 2 -o ib.tar.zst "$BASE/$IB_FILE"
+          tar --zstd -xf ib.tar.zst
+          IB_DIR="$(tar -tf ib.tar.zst | head -n1 | cut -d/ -f1)"
+          echo "IB_DIR=$IB_DIR" >> $GITHUB_ENV
+          echo "IB_DIR=$IB_DIR"
 
-      - name: Prepare FILES (flow offload 开机自启等)
+      # （可选）切换国内镜像：把下一步的 if 改成 'always()' 即可启用
+      - name: (optional) Switch repositories to BFSU mirror
+        if: false
         shell: bash
         run: |
           set -e
-          cd "${IB_DIR}"
-          # 如果仓库里有 files/，一起带上
+          cd "$IB_DIR"
+          sed -i 's#https://downloads.openwrt.org#https://mirrors.bfsu.edu.cn/openwrt#g' repositories.conf
+
+      - name: Prepare FILES (enable flow offload on boot; docker bridge sysctl)
+        shell: bash
+        run: |
+          set -e
+          cd "$IB_DIR"
+          # 合并用户自带 files/（若仓库中存在）
           if [ -d "${GITHUB_WORKSPACE}/files" ]; then
             cp -a "${GITHUB_WORKSPACE}/files" .
           else
             mkdir -p files
           fi
-          # 开机启用软件/硬件 flow offload（硬件支持时自动生效）
+          # 开机启用软件/硬件 flow offload
           mkdir -p files/etc/uci-defaults
           cat > files/etc/uci-defaults/99-flow-offload << 'EOF'
           #!/bin/sh
@@ -68,37 +81,37 @@ jobs:
           EOF
           chmod +x files/etc/uci-defaults/99-flow-offload
 
-          # Docker 常见内核桥过滤（大多已启，保险起见）
+          # docker 桥过滤（通常内核默认已启，此处保险）
           mkdir -p files/etc/sysctl.d
           cat > files/etc/sysctl.d/90-bridge-nf.conf << 'EOF'
           net.bridge.bridge-nf-call-iptables=1
           net.bridge.bridge-nf-call-ip6tables=1
           EOF
 
-      - name: (可选) 本地 pkgs 源（自动收集 luci-app-openclash*.ipk）
+      - name: (optional) Local pkgs repo (auto-index pkgs/*.ipk e.g. luci-app-openclash)
         shell: bash
         run: |
           set -e
-          cd "${IB_DIR}"
+          cd "$IB_DIR"
           if [ -d "${GITHUB_WORKSPACE}/pkgs" ]; then
             mkdir -p pkgs
             cp -a "${GITHUB_WORKSPACE}/pkgs/"* pkgs/ || true
           fi
-          # 如果你把 openclash ipk 放到仓库根目录 pkgs/，这段会建立本地源
           if [ -d pkgs ] && ls pkgs/*.ipk >/dev/null 2>&1; then
-            echo "[IB] Build local repo from pkgs/*.ipk"
+            echo "[IB] Found local ipk(s); building local repo..."
             ./staging_dir/host/bin/opkg-make-index pkgs > pkgs/Packages
             gzip -9c pkgs/Packages > pkgs/Packages.gz
             echo "src custom file:pkgs" >> repositories.conf
+            # 想把 openclash 也打进固件：把 'luci-app-openclash' 加到 env.PACKAGES 一行里即可
           else
-            echo "[IB] No local pkgs/*.ipk provided, skip local repo."
+            echo "[IB] No pkgs/*.ipk provided; skip local repo."
           fi
 
-      - name: Build (generic + generic-efi)
+      - name: Build images
         shell: bash
         run: |
           set -e
-          cd "${IB_DIR}"
+          cd "$IB_DIR"
           echo "PACKAGES=${PACKAGES}"
           for p in ${PROFILES}; do
             echo "=== Build profile: $p ==="
@@ -109,5 +122,5 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: IB-x86_64-docker-openclash-${{ github.run_id }}
-          path: ${{ env.IB_DIR }}/bin/targets/${{ env.TARGET }}/${{ env.SUBTARGET }}/*
+          name: IB-x86_64-openclash-docker-${{ github.run_id }}
+          path: ${{ env.IB_DIR }}/bin/targets/${{ env.TARGET }}/{{ env.SUBTARGET }}/*
