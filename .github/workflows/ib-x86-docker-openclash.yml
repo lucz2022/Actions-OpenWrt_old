@@ -26,7 +26,6 @@ env:
 jobs:
   build:
     runs-on: ubuntu-22.04
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -40,7 +39,7 @@ jobs:
           sudo -E apt-get -qq update
           sudo -E apt-get -qq install -y --no-install-recommends \
             build-essential gawk wget curl ca-certificates xz-utils zstd \
-            rsync file python3 tar coreutils git
+            rsync file python3 tar coreutils git fdisk
           sudo -E apt-get -qq autoremove --purge -y
           sudo -E apt-get -qq clean
 
@@ -48,13 +47,10 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          echo "Base: ${IB_BASE_URL}"
-          echo "Downloading: ${IB_BASE_URL}/${IB_FILE}"
           curl -fL --retry 5 -o "${IB_FILE}" "${IB_BASE_URL}/${IB_FILE}"
           tar --zstd -xf "${IB_FILE}"
           IB_DIR="${IB_FILE%.tar.zst}"
           echo "IB_DIR=${IB_DIR}" >> "$GITHUB_ENV"
-          test -d "${IB_DIR}"
 
       - name: Put custom files (optional)
         shell: bash
@@ -63,6 +59,26 @@ jobs:
           if [ -d "files" ]; then
             rsync -a files/ "${IB_DIR}/files/"
           fi
+
+      # ★ 关键：写 .config 并 defconfig，让 ROOTFS_PARTSIZE 生效
+      - name: Configure ImageBuilder (.config)
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd "${IB_DIR}"
+          # 保留已有 .config 的同时强制覆盖关键项
+          { grep -vE '^(CONFIG_TARGET_ROOTFS_PARTSIZE=|CONFIG_TARGET_ROOTFS_EXT4FS=|CONFIG_TARGET_ROOTFS_SQUASHFS=)' .config 2>/dev/null || true; } > .config.tmp
+          mv .config.tmp .config
+          cat >> .config <<EOF
+CONFIG_TARGET_ROOTFS_EXT4FS=y
+# CONFIG_TARGET_ROOTFS_SQUASHFS is not set
+CONFIG_TARGET_ROOTFS_PARTSIZE=${ROOTFS_MB}
+# 可选：同时产出 EFI 启动镜像
+CONFIG_GRUB_IMAGES=y
+CONFIG_EFI_IMAGES=y
+EOF
+          make defconfig
+          grep -E 'CONFIG_TARGET_ROOTFS_(EXT4FS|SQUASHFS|PARTSIZE)=' .config
 
       - name: Preflight - prune missing packages
         shell: bash
@@ -92,15 +108,10 @@ jobs:
         run: |
           set -euxo pipefail
           cd "${IB_DIR}"
-          echo "PROFILE=${PROFILE}"
-          echo "PACKAGES_FINAL=${PACKAGES_FINAL}"
           make -j"$(nproc)" image \
             PROFILE="${PROFILE}" \
             PACKAGES="${PACKAGES_FINAL}" \
-            FILES=files \
-            CONFIG_TARGET_ROOTFS_EXT4FS=y \
-            CONFIG_TARGET_ROOTFS_SQUASHFS=n \
-            CONFIG_TARGET_ROOTFS_PARTSIZE="${ROOTFS_MB}"
+            FILES=files
 
       - name: Collect artifacts
         shell: bash
@@ -108,6 +119,16 @@ jobs:
           set -euxo pipefail
           mkdir -p out
           cp -av "${IB_DIR}/bin/targets/x86/64/"* out/
+
+      # 可选：验证分区大小，避免“看起来还是128M”的错觉
+      - name: Verify rootfs partition size
+        shell: bash
+        run: |
+          set -euxo pipefail
+          IMG=$(ls out/*combined-efi*.img* out/*combined*.img* 2>/dev/null | head -n1)
+          if [[ "$IMG" == *.gz ]]; then gunzip -kf "$IMG"; IMG="${IMG%.gz}"; fi
+          echo "Inspect: $IMG"
+          fdisk -l "$IMG" || true
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
