@@ -10,17 +10,17 @@
 # See /LICENSE for more information.
 #
 
-name: OpenWrt Builder24.1
+name: OpenWrt Builder
 
 on:
   repository_dispatch:
   workflow_dispatch:
 
 env:
-  REPO_URL: https://github.com/openwrt/openwrt
-  REPO_BRANCH: openwrt-24.10   # 这是分支名，没问题；若固定版本则用 v23.05.5（tag
+  REPO_URL: https://github.com/coolsnowwolf/lede
+  REPO_BRANCH: master
   FEEDS_CONF: feeds.conf.default
-  CONFIG_FILE: clash.config
+  CONFIG_FILE: .config
   DIY_P1_SH: diy-part1.sh
   DIY_P2_SH: diy-part2.sh
   UPLOAD_BIN_DIR: false
@@ -86,28 +86,6 @@ jobs:
         make download -j8
         find dl -size -1024c -exec ls -l {} \;
         find dl -size -1024c -exec rm -f {} \;
-        
-    - name: "Fail-fast: block rust/host by config"
-      if: ${{ env.FORCE_BUILD_RUST != 'true' }}
-      working-directory: ./openwrt
-      shell: bash
-      run: |
-        set -e
-        make defconfig
-        # 列出声明 Build-Depends: rust/host 的包
-        awk -v RS='' '/^Package:/ {p=$2} /Build-Depends:.*rust\/host/ {print p}' tmp/.packageinfo \
-          | sort -u > /tmp/need_rust.txt || true
-        # 当前 .config 里 =y 的包
-        sed -n 's/^CONFIG_PACKAGE_\(.*\)=y/\1/p' .config | sort > /tmp/enabled_all.txt
-        # 交集检查（是否会触发 rust/host）
-        if grep -Fxf /tmp/need_rust.txt /tmp/enabled_all.txt > /dev/null; then
-          echo "✗ Above packages would trigger rust/host. Stop."
-          echo "---- matched ----"
-          grep -Fxf /tmp/need_rust.txt /tmp/enabled_all.txt || true
-          exit 1
-        else
-          echo "✓ No rust/host triggers in current .config"
-        fi
 
     - name: Compile the firmware
       id: compile
