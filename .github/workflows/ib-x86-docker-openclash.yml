@@ -103,6 +103,44 @@ jobs:
           else
             echo "[IB] No pkgs/*.ipk provided; skip local repo."
           fi
+          
+      - name: Preflight & prune missing packages (ImageBuilder)
+        working-directory: ${{ env.IB_DIR }}
+        shell: bash
+        run: |
+          set -e
+      
+          echo "PACKAGES(before)=${PACKAGES}"
+      
+          # 先生成证书/索引，保证 manifest 能解析到仓库索引
+          make info >/dev/null 2>&1 || true
+      
+          # 最多循环 3 次防止死循环
+          for i in 1 2 3; do
+            echo "== Manifest check round $i =="
+            # 只做清单解析，不真正出镜像
+            if make -j1 manifest PACKAGES="${PACKAGES}" PROFILE="${PROFILES%% *}" FILES=files/ >manifest.ok 2>manifest.err; then
+              echo "No missing packages."
+              break
+            fi
+            # 抓“缺包”的名字
+            MISS=$(sed -n 's/.*Cannot install package \([^ ]*\).*/\1/p' manifest.err | sort -u)
+            if [ -z "$MISS" ]; then
+              echo "Manifest failed but no 'Cannot install package ...' found. Stop."
+              cat manifest.err
+              exit 1
+            fi
+            echo "Will drop missing packages: $MISS"
+            # 从 PACKAGES 中剔除这些名字（保留前缀“-xxx”这种卸载标记）
+            for p in $MISS; do
+              PACKAGES="$(echo " $PACKAGES " | sed -E "s/ $p( |$)/ /g")"
+            done
+            PACKAGES="$(echo $PACKAGES)"  # 规整多余空格
+            echo "PACKAGES(now)=${PACKAGES}"
+          done
+      
+          # 把剔除后的 PACKAGES 传回后续步骤可见（可选）
+          echo "PACKAGES=${PACKAGES}" >> $GITHUB_ENV
 
       - name: Build images
         shell: bash
