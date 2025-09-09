@@ -70,13 +70,13 @@ jobs:
           { grep -vE '^(CONFIG_TARGET_ROOTFS_PARTSIZE=|CONFIG_TARGET_ROOTFS_EXT4FS=|CONFIG_TARGET_ROOTFS_SQUASHFS=)' .config 2>/dev/null || true; } > .config.tmp
           mv .config.tmp .config
           cat >> .config <<EOF
-CONFIG_TARGET_ROOTFS_EXT4FS=y
-# CONFIG_TARGET_ROOTFS_SQUASHFS is not set
-CONFIG_TARGET_ROOTFS_PARTSIZE=${ROOTFS_MB}
-# 可选：同时产出 EFI 启动镜像
-CONFIG_GRUB_IMAGES=y
-CONFIG_EFI_IMAGES=y
-EOF
+            CONFIG_TARGET_ROOTFS_EXT4FS=y
+            # CONFIG_TARGET_ROOTFS_SQUASHFS is not set
+            CONFIG_TARGET_ROOTFS_PARTSIZE=${ROOTFS_MB}
+            # 可选：同时产出 EFI 启动镜像
+            CONFIG_GRUB_IMAGES=y
+            CONFIG_EFI_IMAGES=y
+            EOF
           make defconfig
           grep -E 'CONFIG_TARGET_ROOTFS_(EXT4FS|SQUASHFS|PARTSIZE)=' .config
 
