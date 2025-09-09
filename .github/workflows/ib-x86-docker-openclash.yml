@@ -36,16 +36,23 @@ jobs:
         shell: bash
         run: |
           set -e
-          BASE="https://downloads.openwrt.org/${OWRT_TREE}/targets/${TARGET}/${SUBTARGET}"
+          BASE="https://downloads.openwrt.org/releases/24.10.2/targets/x86/64"
           echo "Base: $BASE"
+      
+          # 拿到 .tar.zst 文件名（不用 tar 列表）
           IB_FILE="$(curl -fsSL "$BASE/" | grep -o 'openwrt-imagebuilder-[^"]*Linux-x86_64\.tar\.zst' | head -n1)"
           test -n "$IB_FILE" || { echo "No ImageBuilder .tar.zst found on $BASE"; exit 8; }
+      
           echo "Downloading: $BASE/$IB_FILE"
           curl -fL --retry 5 --retry-delay 2 -o ib.tar.zst "$BASE/$IB_FILE"
+      
+          # 解包（不会往 stdout 写）
           tar --zstd -xf ib.tar.zst
-          IB_DIR="$(tar -tf ib.tar.zst | head -n1 | cut -d/ -f1)"
-          echo "IB_DIR=$IB_DIR" >> $GITHUB_ENV
-          echo "IB_DIR=$IB_DIR"
+      
+          # 通过文件系统查目录名，避免 tar|head 触发 SIGPIPE
+          IB_DIR="$(ls -d openwrt-imagebuilder-* 2>/dev/null | head -n1)"
+          test -n "$IB_DIR" || { echo "Extracted dir not found"; exit 9; }
+          echo "IB_DIR=$IB_DIR" | tee -a "$GITHUB_ENV"
 
       - name: Prepare FILES (enable flow offload; docker bridge sysctl)
         shell: bash
