@@ -1,19 +1,31 @@
-name: IB x86_64 (Docker + Clash runtime + Offload) 24.10.2
+name: OpenWrt ImageBuilder 24.10.2 (x86_64, Clash运行环境+Docker基座)
 
 on:
   workflow_dispatch:
 
 env:
-  # ===== 使用稳定版 24.10.2 =====
-  OWRT_TREE: releases/24.10.2
-  TARGET: x86
-  SUBTARGET: 64
-  PROFILES: "generic generic-efi"   # 两种都打；只要其一就改成单个
-  TZ: Asia/Shanghai
+  # 固定到稳定版 24.10.2
+  IB_BASE_URL: https://downloads.openwrt.org/releases/24.10.2/targets/x86/64
+  IB_FILE: openwrt-imagebuilder-24.10.2-x86-64.Linux-x86_64.tar.zst
 
-  # ===== 一行包清单（官方源可用；不要换行）=====
-  # Clash 运行环境（fw4/nft/tproxy/dnsmasq-full）+ Docker + I226(igc) + PVE/Hyper-V 驱动 + 基本加速(offload)
-  PACKAGES: "dnsmasq-full -dnsmasq -dnsmasq-dhcpv6 firewall4 nftables iptables-nft kmod-nf-conntrack kmod-nf-nat kmod-nft-nat kmod-nft-tproxy kmod-nft-socket kmod-nft-offload kmod-tun kmod-inet-diag ca-bundle ca-certificates curl wget-ssl unzip bash coreutils-nohup ip-full luci luci-compat luci-app-firewall dockerd docker containerd kmod-veth kmod-br-netfilter kmod-fs-overlay kmod-fs-ext4 irqbalance ethtool kmod-igc kmod-virtio kmod-virtio-net kmod-virtio-blk kmod-virtio-scsi kmod-virtio-console kmod-balloon kmod-hv-vmbus kmod-hv-netvsc kmod-hv-storvsc"
+  # 选择要生成的配置：generic-efi 支持 UEFI（PVE/Hyper-V/大部分新主板都OK）
+  # 如想同时出 BIOS 版，也可写: "generic-efi generic"
+  PROFILES: generic-efi
+
+  # 预装包（**单行**，空格分隔；不能换行）
+  # - 用 dnsmasq-full 替换基础版 dnsmasq，避免冲突：前缀“-dnsmasq -dnsmasq-dhcpv6”
+  # - Clash 所需 nft/tproxy + Docker 三件套 + 常见虚拟化/直通驱动（无 virtio）
+  PACKAGES: >-
+    dnsmasq-full -dnsmasq -dnsmasq-dhcpv6
+    firewall4 nftables iptables-nft
+    kmod-nf-conntrack kmod-nf-nat kmod-nft-nat kmod-nft-tproxy kmod-nft-socket kmod-nft-offload
+    kmod-tun kmod-inet-diag
+    ca-bundle ca-certificates curl wget-ssl unzip bash coreutils-nohup ip-full
+    luci luci-compat luci-app-firewall
+    dockerd docker containerd kmod-veth kmod-br-netfilter
+    irqbalance ethtool
+    kmod-igc
+    kmod-hv-vmbus kmod-hv-netvsc kmod-hv-storvsc
 
 jobs:
   build:
@@ -23,139 +35,84 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Init build env
-        shell: bash
-        run: |
-          sudo -E apt-get -qq update
-          sudo -E apt-get -qq install -y ca-certificates curl xz-utils zstd tar coreutils
-          sudo timedatectl set-timezone "$TZ"
-          df -hT
-
-      # 直接从稳定版目录自动识别 .tar.zst
-      - name: Download ImageBuilder (.tar.zst from releases/24.10.2)
+      - name: Prepare host (minimal deps)
         shell: bash
         run: |
           set -e
-          BASE="https://downloads.openwrt.org/releases/24.10.2/targets/x86/64"
-          echo "Base: $BASE"
-      
-          # 拿到 .tar.zst 文件名（不用 tar 列表）
-          IB_FILE="$(curl -fsSL "$BASE/" | grep -o 'openwrt-imagebuilder-[^"]*Linux-x86_64\.tar\.zst' | head -n1)"
-          test -n "$IB_FILE" || { echo "No ImageBuilder .tar.zst found on $BASE"; exit 8; }
-      
-          echo "Downloading: $BASE/$IB_FILE"
-          curl -fL --retry 5 --retry-delay 2 -o ib.tar.zst "$BASE/$IB_FILE"
-      
-          # 解包（不会往 stdout 写）
+          sudo apt-get update -qq
+          # tar 支持 --zstd 已包含于 Ubuntu 22.04 的 bsdtar/gnu tar
+          sudo apt-get install -yqq curl xz-utils zstd ca-certificates
+
+      - name: Download ImageBuilder 24.10.2
+        shell: bash
+        run: |
+          set -e
+          echo "Base: $IB_BASE_URL"
+          echo "Get:  $IB_FILE"
+          curl -fL --retry 5 --retry-delay 2 -o ib.tar.zst "$IB_BASE_URL/$IB_FILE"
           tar --zstd -xf ib.tar.zst
-      
-          # 通过文件系统查目录名，避免 tar|head 触发 SIGPIPE
           IB_DIR="$(ls -d openwrt-imagebuilder-* 2>/dev/null | head -n1)"
-          test -n "$IB_DIR" || { echo "Extracted dir not found"; exit 9; }
+          test -n "$IB_DIR" || { echo "Extracted IB dir not found"; exit 9; }
           echo "IB_DIR=$IB_DIR" | tee -a "$GITHUB_ENV"
 
-      - name: Prepare FILES (enable flow offload; docker bridge sysctl)
+      - name: (Optional) Add ./files overlay
+        shell: bash
+        run: |
+          set -e
+          if [ -d files ]; then
+            mkdir -p "$IB_DIR/files"
+            cp -a files/* "$IB_DIR/files/"
+          else
+            mkdir -p "$IB_DIR/files"   # 保证存在（某些脚本依赖）
+          fi
+
+      # 预检：把仓库里“找不到的包”自动从 PACKAGES 中剔除，最多循环 3 次
+      - name: Preflight & prune missing packages
         shell: bash
         run: |
           set -e
           cd "$IB_DIR"
-          # 合并你仓库的 files/（若存在）
-          if [ -d "${GITHUB_WORKSPACE}/files" ]; then
-            cp -a "${GITHUB_WORKSPACE}/files" .
-          else
-            mkdir -p files
-          fi
-          # 开机启用软件/硬件 flow offload（官方加速）
-          mkdir -p files/etc/uci-defaults
-          cat > files/etc/uci-defaults/99-flow-offload << 'EOF'
-          #!/bin/sh
-          uci -q set firewall.@defaults[0].flow_offloading='1'
-          uci -q set firewall.@defaults[0].flow_offloading_hw='1'
-          uci -q commit firewall
-          exit 0
-          EOF
-          chmod +x files/etc/uci-defaults/99-flow-offload
-
-          # Docker 桥过滤（保险起见）
-          mkdir -p files/etc/sysctl.d
-          cat > files/etc/sysctl.d/90-bridge-nf.conf << 'EOF'
-          net.bridge.bridge-nf-call-iptables=1
-          net.bridge.bridge-nf-call-ip6tables=1
-          EOF
-
-      # （可选）把你准备好的本地 ipk（例如 luci-app-openclash）放到仓库根 pkgs/ 目录即可一起打包
-      - name: (optional) Local pkgs repo (pkgs/*.ipk e.g. luci-app-openclash)
-        shell: bash
-        run: |
-          set -e
-          cd "$IB_DIR"
-          if [ -d "${GITHUB_WORKSPACE}/pkgs" ]; then
-            mkdir -p pkgs
-            cp -a "${GITHUB_WORKSPACE}/pkgs/"* pkgs/ || true
-          fi
-          if [ -d pkgs ] && ls pkgs/*.ipk >/dev/null 2>&1; then
-            echo "[IB] Found local ipk(s); building local repo..."
-            ./staging_dir/host/bin/opkg-make-index pkgs > pkgs/Packages
-            gzip -9c pkgs/Packages > pkgs/Packages.gz
-            echo "src custom file:pkgs" >> repositories.conf
-            # 需要把 luci-app-openclash 打进固件：把它的 ipk 放 pkgs/ 下，
-            # 然后把包名追加到 env.PACKAGES 即可。
-          else
-            echo "[IB] No pkgs/*.ipk provided; skip local repo."
-          fi
-          
-      - name: Preflight & prune missing packages (ImageBuilder)
-        working-directory: ${{ env.IB_DIR }}
-        shell: bash
-        run: |
-          set -e
-      
           echo "PACKAGES(before)=${PACKAGES}"
-      
-          # 先生成证书/索引，保证 manifest 能解析到仓库索引
+          # 先拉索引信息（不会真正编译）
           make info >/dev/null 2>&1 || true
-      
-          # 最多循环 3 次防止死循环
+
+          # 仅用第一个 profile 做 manifest 预检，避免多profile互相影响
+          FIRST_PROFILE="${PROFILES%% *}"
+
           for i in 1 2 3; do
             echo "== Manifest check round $i =="
-            # 只做清单解析，不真正出镜像
-            if make -j1 manifest PACKAGES="${PACKAGES}" PROFILE="${PROFILES%% *}" FILES=files/ >manifest.ok 2>manifest.err; then
+            if make -j1 manifest PROFILE="$FIRST_PROFILE" PACKAGES="${PACKAGES}" FILES="files/" >manifest.ok 2>manifest.err; then
               echo "No missing packages."
               break
             fi
-            # 抓“缺包”的名字
             MISS=$(sed -n 's/.*Cannot install package \([^ ]*\).*/\1/p' manifest.err | sort -u)
             if [ -z "$MISS" ]; then
-              echo "Manifest failed but no 'Cannot install package ...' found. Stop."
+              echo "Manifest failed but no 'Cannot install package ...' found."
               cat manifest.err
               exit 1
             fi
-            echo "Will drop missing packages: $MISS"
-            # 从 PACKAGES 中剔除这些名字（保留前缀“-xxx”这种卸载标记）
+            echo "Drop missing: $MISS"
             for p in $MISS; do
               PACKAGES="$(echo " $PACKAGES " | sed -E "s/ $p( |$)/ /g")"
             done
-            PACKAGES="$(echo $PACKAGES)"  # 规整多余空格
+            PACKAGES="$(echo $PACKAGES)"
             echo "PACKAGES(now)=${PACKAGES}"
           done
-      
-          # 把剔除后的 PACKAGES 传回后续步骤可见（可选）
-          echo "PACKAGES=${PACKAGES}" >> $GITHUB_ENV
+
+          echo "PACKAGES=${PACKAGES}" >> "$GITHUB_ENV"
 
       - name: Build images
         shell: bash
         run: |
           set -e
           cd "$IB_DIR"
-          echo "PACKAGES=${PACKAGES}"
-          for p in ${PROFILES}; do
-            echo "=== Build profile: $p ==="
-            make image PROFILE="$p" PACKAGES="${PACKAGES}" FILES=files/ || { echo "Build failed: $p"; exit 1; }
-          done
-          ls -lh "bin/targets/${TARGET}/${SUBTARGET}/"
+          echo "Profiles: $PROFILES"
+          echo "Packages: $PACKAGES"
+          # 允许多个 profile，一次性出齐
+          make -j$(nproc) image PROFILE="$PROFILES" PACKAGES="${PACKAGES}" FILES="files/"
 
-      - name: Upload artifacts
+      - name: Publish artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: IB-x86_64-openclash-docker-${{ github.run_id }}
-          path: ${{ env.IB_DIR }}/bin/targets/${{ env.TARGET }}/${{ env.SUBTARGET }}/*
+          name: openwrt-24.10.2-x86_64-images
+          path: ${{ env.IB_DIR }}/bin/targets/*/*
