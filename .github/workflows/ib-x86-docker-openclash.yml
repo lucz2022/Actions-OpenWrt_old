@@ -1,0 +1,113 @@
+name: IB x86_64 + Docker + OpenClash runtime
+
+on:
+  workflow_dispatch:
+
+env:
+  # ===== 版本/目标设置 =====
+  OWRT_TREE: snapshots              # snapshots（推荐）或 releases/24.10.0
+  TARGET: x86
+  SUBTARGET: 64
+  PROFILES: "generic generic-efi"   # 同时打 BIOS/UEFI；只要其一就留一个
+  TZ: Asia/Shanghai
+
+  # ===== 关键：一行包清单（空格分隔，不换行）=====
+  PACKAGES: "dnsmasq-full -dnsmasq -dnsmasq-dhcpv6 firewall4 nftables iptables-nft kmod-nf-conntrack kmod-nf-nat kmod-nft-nat kmod-nft-tproxy kmod-nft-socket kmod-nft-offload kmod-tun kmod-inet-diag ca-bundle ca-certificates curl wget-ssl unzip bash coreutils-nohup ip-full luci luci-compat luci-app-firewall kmod-igc dockerd docker containerd kmod-bridge kmod-veth kmod-br-netfilter kmod-fs-overlay kmod-fs-ext4 luci-app-dockerman luci-i18n-dockerman-zh-cn irqbalance ethtool"
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Init build env
+        shell: bash
+        run: |
+          sudo -E apt-get -qq update
+          sudo -E apt-get -qq install -y build-essential qemu-utils libncurses5 ca-certificates wget xz-utils unzip python3
+          sudo timedatectl set-timezone "$TZ"
+          df -hT
+
+      - name: Download ImageBuilder
+        id: dl
+        shell: bash
+        run: |
+          set -e
+          base="https://downloads.openwrt.org/${OWRT_TREE}/targets/${TARGET}/${SUBTARGET}"
+          # snapshots 文件名
+          ib_tar="openwrt-imagebuilder-${TARGET}-${SUBTARGET}.Linux-x86_64.tar.xz"
+          # 如果你改 env.OWRT_TREE 为 releases/24.10.0，请把上面改成：
+          # ib_tar="openwrt-imagebuilder-24.10.0-${TARGET}-${SUBTARGET}.Linux-x86_64.tar.xz"
+          echo "Download: ${base}/${ib_tar}"
+          wget -q "${base}/${ib_tar}"
+          tar -xJf "${ib_tar}"
+          ib_dir=$(tar -tf "${ib_tar}" | head -1 | cut -d/ -f1)
+          echo "IB_DIR=${ib_dir}" >> $GITHUB_ENV
+
+      - name: Prepare FILES (flow offload 开机自启等)
+        shell: bash
+        run: |
+          set -e
+          cd "${IB_DIR}"
+          # 如果仓库里有 files/，一起带上
+          if [ -d "${GITHUB_WORKSPACE}/files" ]; then
+            cp -a "${GITHUB_WORKSPACE}/files" .
+          else
+            mkdir -p files
+          fi
+          # 开机启用软件/硬件 flow offload（硬件支持时自动生效）
+          mkdir -p files/etc/uci-defaults
+          cat > files/etc/uci-defaults/99-flow-offload << 'EOF'
+          #!/bin/sh
+          uci -q set firewall.@defaults[0].flow_offloading='1'
+          uci -q set firewall.@defaults[0].flow_offloading_hw='1'
+          uci -q commit firewall
+          exit 0
+          EOF
+          chmod +x files/etc/uci-defaults/99-flow-offload
+
+          # Docker 常见内核桥过滤（大多已启，保险起见）
+          mkdir -p files/etc/sysctl.d
+          cat > files/etc/sysctl.d/90-bridge-nf.conf << 'EOF'
+          net.bridge.bridge-nf-call-iptables=1
+          net.bridge.bridge-nf-call-ip6tables=1
+          EOF
+
+      - name: (可选) 本地 pkgs 源（自动收集 luci-app-openclash*.ipk）
+        shell: bash
+        run: |
+          set -e
+          cd "${IB_DIR}"
+          if [ -d "${GITHUB_WORKSPACE}/pkgs" ]; then
+            mkdir -p pkgs
+            cp -a "${GITHUB_WORKSPACE}/pkgs/"* pkgs/ || true
+          fi
+          # 如果你把 openclash ipk 放到仓库根目录 pkgs/，这段会建立本地源
+          if [ -d pkgs ] && ls pkgs/*.ipk >/dev/null 2>&1; then
+            echo "[IB] Build local repo from pkgs/*.ipk"
+            ./staging_dir/host/bin/opkg-make-index pkgs > pkgs/Packages
+            gzip -9c pkgs/Packages > pkgs/Packages.gz
+            echo "src custom file:pkgs" >> repositories.conf
+          else
+            echo "[IB] No local pkgs/*.ipk provided, skip local repo."
+          fi
+
+      - name: Build (generic + generic-efi)
+        shell: bash
+        run: |
+          set -e
+          cd "${IB_DIR}"
+          echo "PACKAGES=${PACKAGES}"
+          for p in ${PROFILES}; do
+            echo "=== Build profile: $p ==="
+            make image PROFILE="$p" PACKAGES="${PACKAGES}" FILES=files/ || { echo "Build failed: $p"; exit 1; }
+          done
+          ls -lh bin/targets/${TARGET}/${SUBTARGET}/
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: IB-x86_64-docker-openclash-${{ github.run_id }}
+          path: ${{ env.IB_DIR }}/bin/targets/${{ env.TARGET }}/${{ env.SUBTARGET }}/*
