@@ -1,28 +1,23 @@
-name: OpenWrt ImageBuilder 24.10.2 (x86_64, Clash运行环境+Docker基座)
+name: OpenWrt-IB-24.10.2-x86_64
 
 on:
   workflow_dispatch:
 
 env:
-  # 固定到稳定版 24.10.2
   IB_BASE_URL: https://downloads.openwrt.org/releases/24.10.2/targets/x86/64
   IB_FILE: openwrt-imagebuilder-24.10.2-x86-64.Linux-x86_64.tar.zst
-
-  # 选择要生成的配置：generic-efi 支持 UEFI（PVE/Hyper-V/大部分新主板都OK）
-  # 如想同时出 BIOS 版，也可写: "generic-efi generic"
-  PROFILES: generic-efi
-
-  # 预装包（**单行**，空格分隔；不能换行）
-  # - 用 dnsmasq-full 替换基础版 dnsmasq，避免冲突：前缀“-dnsmasq -dnsmasq-dhcpv6”
-  # - Clash 所需 nft/tproxy + Docker 三件套 + 常见虚拟化/直通驱动（无 virtio）
+  IB_DIR: openwrt-imagebuilder-24.10.2-x86-64.Linux-x86_64
+  PROFILE: generic   # 注意：不是 generic-efi
+  # 包清单（按你要求：DNS/DHCP 用 dnsmasq-full、fw4/nft、Clash/后装Docker所需内核等）
   PACKAGES: >-
-    dnsmasq-full -dnsmasq -dnsmasq-dhcpv6
+    dnsmasq-full -dnsmasq
     firewall4 nftables iptables-nft
     kmod-nf-conntrack kmod-nf-nat kmod-nft-nat kmod-nft-tproxy kmod-nft-socket kmod-nft-offload
     kmod-tun kmod-inet-diag
     ca-bundle ca-certificates curl wget-ssl unzip bash coreutils-nohup ip-full
     luci luci-compat luci-app-firewall
-    dockerd docker containerd kmod-veth kmod-br-netfilter
+    dockerd containerd
+    kmod-veth kmod-br-netfilter
     irqbalance ethtool
     kmod-igc
     kmod-hv-vmbus kmod-hv-netvsc kmod-hv-storvsc
@@ -30,89 +25,62 @@ env:
 jobs:
   build:
     runs-on: ubuntu-22.04
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Prepare host (minimal deps)
-        shell: bash
+      - name: Prepare host
         run: |
-          set -e
           sudo apt-get update -qq
-          # tar 支持 --zstd 已包含于 Ubuntu 22.04 的 bsdtar/gnu tar
-          sudo apt-get install -yqq curl xz-utils zstd ca-certificates
+          sudo apt-get install -yqq xz-utils zstd make git ca-certificates curl
 
-      - name: Download ImageBuilder 24.10.2
-        shell: bash
+      - name: Download ImageBuilder
         run: |
-          set -e
           echo "Base: $IB_BASE_URL"
-          echo "Get:  $IB_FILE"
-          curl -fL --retry 5 --retry-delay 2 -o ib.tar.zst "$IB_BASE_URL/$IB_FILE"
-          tar --zstd -xf ib.tar.zst
-          IB_DIR="$(ls -d openwrt-imagebuilder-* 2>/dev/null | head -n1)"
-          test -n "$IB_DIR" || { echo "Extracted IB dir not found"; exit 9; }
-          echo "IB_DIR=$IB_DIR" | tee -a "$GITHUB_ENV"
+          echo "Downloading: $IB_BASE_URL/$IB_FILE"
+          curl -fL "$IB_BASE_URL/$IB_FILE" -o "$IB_FILE"
+          tar --zstd -xf "$IB_FILE"
 
-      - name: (Optional) Add ./files overlay
-        shell: bash
+      - name: Show IB info (profiles/targets)
+        working-directory: ./${{ env.IB_DIR }}
+        run: |
+          make info || true
+          echo "---- Available profiles ----"
+          make info | sed -n 's/^Profile: //p' || true
+
+      - name: Put files/ (optional)
+        run: |
+          mkdir -p "${{ env.IB_DIR }}/files"
+          # 如需预置 /etc/config/* 等，这里往 $IB_DIR/files 下放
+
+      - name: Dry-run manifest (catch missing pkgs)
+        working-directory: ./${{ env.IB_DIR }}
         run: |
           set -e
-          if [ -d files ]; then
-            mkdir -p "$IB_DIR/files"
-            cp -a files/* "$IB_DIR/files/"
-          else
-            mkdir -p "$IB_DIR/files"   # 保证存在（某些脚本依赖）
-          fi
-
-      # 预检：把仓库里“找不到的包”自动从 PACKAGES 中剔除，最多循环 3 次
-      - name: Preflight & prune missing packages
-        shell: bash
-        run: |
-          set -e
-          cd "$IB_DIR"
           echo "PACKAGES(before)=${PACKAGES}"
-          # 先拉索引信息（不会真正编译）
-          make info >/dev/null 2>&1 || true
+          # 先跑 manifest，便于提前发现缺包
+          make manifest PROFILE="${PROFILE}" PACKAGES="${PACKAGES}" >manifest.ok 2>manifest.err || true
+          if grep -q "Cannot install package" manifest.err; then
+            echo "== Manifest errors ==" && cat manifest.err && exit 1
+          fi
+          # 有时 _check_profile 导致失败且不含 'Cannot install'，再检查一次 Profile 是否存在
+          if ! make info | sed -n 's/^Profile: //p' | grep -qx "${PROFILE}"; then
+            echo "Profile '${PROFILE}' not found in this IB. Available:" 
+            make info | sed -n 's/^Profile: //p'
+            exit 1
+          fi
+          # 到这里基本可以构建了
 
-          # 仅用第一个 profile 做 manifest 预检，避免多profile互相影响
-          FIRST_PROFILE="${PROFILES%% *}"
-
-          for i in 1 2 3; do
-            echo "== Manifest check round $i =="
-            if make -j1 manifest PROFILE="$FIRST_PROFILE" PACKAGES="${PACKAGES}" FILES="files/" >manifest.ok 2>manifest.err; then
-              echo "No missing packages."
-              break
-            fi
-            MISS=$(sed -n 's/.*Cannot install package \([^ ]*\).*/\1/p' manifest.err | sort -u)
-            if [ -z "$MISS" ]; then
-              echo "Manifest failed but no 'Cannot install package ...' found."
-              cat manifest.err
-              exit 1
-            fi
-            echo "Drop missing: $MISS"
-            for p in $MISS; do
-              PACKAGES="$(echo " $PACKAGES " | sed -E "s/ $p( |$)/ /g")"
-            done
-            PACKAGES="$(echo $PACKAGES)"
-            echo "PACKAGES(now)=${PACKAGES}"
-          done
-
-          echo "PACKAGES=${PACKAGES}" >> "$GITHUB_ENV"
-
-      - name: Build images
-        shell: bash
+      - name: Build (EFI & non-EFI 均会产出；如只要 EFI，可加 EFI_IMAGES=y)
+        working-directory: ./${{ env.IB_DIR }}
         run: |
-          set -e
-          cd "$IB_DIR"
-          echo "Profiles: $PROFILES"
-          echo "Packages: $PACKAGES"
-          # 允许多个 profile，一次性出齐
-          make -j$(nproc) image PROFILE="$PROFILES" PACKAGES="${PACKAGES}" FILES="files/"
+          make image PROFILE="${PROFILE}" PACKAGES="${PACKAGES}" \
+            BIN_DIR=./bin \
+            EXTRA_IMAGE_NAME="$(date +%Y%m%d%H%M)"
+          ls -lh bin/targets/*/*
 
-      - name: Publish artifacts
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: openwrt-24.10.2-x86_64-images
-          path: ${{ env.IB_DIR }}/bin/targets/*/*
+          name: openwrt-24.10.2-x86_64-${{ env.PROFILE }}
+          path: ${{ env.IB_DIR }}/bin/targets/*/*/*
