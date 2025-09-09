@@ -1,86 +1,96 @@
-name: OpenWrt-IB-24.10.2-x86_64
+name: OpenWrt IB x86 BIOS 24.10.2
 
 on:
   workflow_dispatch:
 
-env:
-  IB_BASE_URL: https://downloads.openwrt.org/releases/24.10.2/targets/x86/64
-  IB_FILE: openwrt-imagebuilder-24.10.2-x86-64.Linux-x86_64.tar.zst
-  IB_DIR: openwrt-imagebuilder-24.10.2-x86-64.Linux-x86_64
-  PROFILE: generic   # 注意：不是 generic-efi
-  # 包清单（按你要求：DNS/DHCP 用 dnsmasq-full、fw4/nft、Clash/后装Docker所需内核等）
-  PACKAGES: >-
-    dnsmasq-full -dnsmasq
-    firewall4 nftables iptables-nft
-    kmod-nf-conntrack kmod-nf-nat kmod-nft-nat kmod-nft-tproxy kmod-nft-socket kmod-nft-offload
-    kmod-tun kmod-inet-diag
-    ca-bundle ca-certificates curl wget-ssl unzip bash coreutils-nohup ip-full
-    luci luci-compat luci-app-firewall
-    dockerd containerd
-    kmod-veth kmod-br-netfilter
-    irqbalance ethtool
-    kmod-igc
-    kmod-hv-vmbus kmod-hv-netvsc kmod-hv-storvsc
-
 jobs:
   build:
     runs-on: ubuntu-22.04
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+    env:
+      IB_BASE_URL: https://downloads.openwrt.org/releases/24.10.2/targets/x86/64
+      IB_FILE: openwrt-imagebuilder-24.10.2-x86-64.Linux-x86_64.tar.zst
+      IB_DIR: openwrt-imagebuilder-24.10.2-x86-64.Linux-x86_64
+      PROFILE: generic
+      # 一行写完，别换行（用空格分隔）
+      PACKAGES: dnsmasq-full -dnsmasq firewall4 nftables iptables-nft kmod-nf-conntrack kmod-nf-nat kmod-nft-nat kmod-nft-tproxy kmod-nft-socket kmod-nft-offload kmod-tun kmod-inet-diag ca-bundle ca-certificates curl wget-ssl unzip bash coreutils-nohup ip-full luci luci-compat luci-app-firewall dockerd containerd kmod-veth kmod-br-netfilter irqbalance ethtool kmod-igc
+      # 如需 Virtio（KVM/PVE 强烈建议）：追加 kmod-virtio-net kmod-virtio-blk kmod-virtio-scsi
+      # PACKAGES: <上面这些> kmod-virtio-net kmod-virtio-blk kmod-virtio-scsi
 
-      - name: Prepare host
+    steps:
+      - name: Prepare
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -yqq xz-utils zstd make git ca-certificates curl
+          sudo apt-get update
+          sudo apt-get install -y zstd qemu-utils xz-utils
 
       - name: Download ImageBuilder
         run: |
           echo "Base: $IB_BASE_URL"
           echo "Downloading: $IB_BASE_URL/$IB_FILE"
-          curl -fL "$IB_BASE_URL/$IB_FILE" -o "$IB_FILE"
-          tar --zstd -xf "$IB_FILE"
+          curl -fSL --retry 3 "$IB_BASE_URL/$IB_FILE" -o "$IB_FILE"
+          tar --use-compress-program=unzstd -xf "$IB_FILE"
 
-      - name: Show IB info (profiles/targets)
+      # 可选：自动剔除仓库里不存在的包，防止 manifest 失败
+      - name: Prune packages not in repo (optional but recommended)
         working-directory: ./${{ env.IB_DIR }}
-        run: |
-          make info || true
-          echo "---- Available profiles ----"
-          make info | sed -n 's/^Profile: //p' || true
-
-      - name: Put files/ (optional)
-        run: |
-          mkdir -p "${{ env.IB_DIR }}/files"
-          # 如需预置 /etc/config/* 等，这里往 $IB_DIR/files 下放
-
-      - name: Dry-run manifest (catch missing pkgs)
-        working-directory: ./${{ env.IB_DIR }}
+        shell: bash
         run: |
           set -e
           echo "PACKAGES(before)=${PACKAGES}"
-          # 先跑 manifest，便于提前发现缺包
-          make manifest PROFILE="${PROFILE}" PACKAGES="${PACKAGES}" >manifest.ok 2>manifest.err || true
-          if grep -q "Cannot install package" manifest.err; then
-            echo "== Manifest errors ==" && cat manifest.err && exit 1
-          fi
-          # 有时 _check_profile 导致失败且不含 'Cannot install'，再检查一次 Profile 是否存在
-          if ! make info | sed -n 's/^Profile: //p' | grep -qx "${PROFILE}"; then
-            echo "Profile '${PROFILE}' not found in this IB. Available:" 
-            make info | sed -n 's/^Profile: //p'
-            exit 1
-          fi
-          # 到这里基本可以构建了
+          # 先触发索引生成（即使报错也无所谓）
+          make manifest PROFILE="${PROFILE}" PACKAGES="${PACKAGES}" > /dev/null 2>&1 || true
 
-      - name: Build (EFI & non-EFI 均会产出；如只要 EFI，可加 EFI_IMAGES=y)
+          # 汇总 IB 已有包名（基础 + luci + packages + routing + telephony + kmods）
+          for d in dl/openwrt_*; do
+            [ -d "$d" ] || continue
+            zcat "$d"/Packages.gz 2>/dev/null | awk '/^Package: /{print $2}'
+          done > /tmp/all_pkgs.txt || true
+          zcat dl/openwrt_kmods/Packages.gz 2>/dev/null | awk '/^Package: /{print $2}' >> /tmp/all_pkgs.txt || true
+          sort -u -o /tmp/all_pkgs.txt /tmp/all_pkgs.txt || true
+
+          # 逐项过滤（保留 -pkg 语法；正向安装的必须存在）
+          tr ' ' '\n' <<< "${PACKAGES}" | sed '/^$/d' > /tmp/want.txt
+          awk 'BEGIN{while((getline<"/tmp/all_pkgs.txt")>0) have[$0]=1}
+               {
+                 if ($0 ~ /^-/) { print; next }
+                 if (have[$0]) print; else printf "## drop-missing: %s\n", $0 > "/tmp/drop.log"
+               }' /tmp/want.txt > /tmp/want.pruned || true
+          NEW_PACKAGES=$(tr '\n' ' ' < /tmp/want.pruned)
+          echo "PACKAGES(after)=${NEW_PACKAGES}"
+          [ -s /tmp/drop.log ] && echo "::warning file=PACKAGES::$(cat /tmp/drop.log)"
+          echo "NEW_PACKAGES=${NEW_PACKAGES}" >> $GITHUB_ENV
+
+      - name: Build BIOS image (PROFILE=generic)
         working-directory: ./${{ env.IB_DIR }}
         run: |
-          make image PROFILE="${PROFILE}" PACKAGES="${PACKAGES}" \
-            BIN_DIR=./bin \
-            EXTRA_IMAGE_NAME="$(date +%Y%m%d%H%M)"
-          ls -lh bin/targets/*/*
+          make image PROFILE="${PROFILE}" PACKAGES="${NEW_PACKAGES:-$PACKAGES}"
+
+      - name: Collect BIOS raw image
+        id: collect
+        working-directory: ./${{ env.IB_DIR }}/bin/targets/x86/64
+        run: |
+          # 找到 BIOS raw 镜像（combined.img.gz，squashfs 或 ext4 均可，这里优先 squashfs）
+          IMG_GZ=$(ls *-generic-squashfs-combined.img.gz 2>/dev/null | head -n1 || true)
+          if [ -z "$IMG_GZ" ]; then
+            IMG_GZ=$(ls *-generic-ext4-combined.img.gz 2>/dev/null | head -n1 || true)
+          fi
+          if [ -z "$IMG_GZ" ]; then
+            echo "No BIOS combined img found"; ls -l; exit 1
+          fi
+          echo "FOUND_IMG_GZ=$IMG_GZ" >> "$GITHUB_OUTPUT"
+          gunzip -c "$IMG_GZ" > openwrt-24.10.2-x8664-bios.img
+          echo "RAW_IMG=$PWD/openwrt-24.10.2-x8664-bios.img" >> "$GITHUB_OUTPUT"
+
+      - name: Convert disk formats (qcow2/vmdk/vhdx)
+        working-directory: ./${{ env.IB_DIR }}/bin/targets/x86/64
+        run: |
+          RAW=./openwrt-24.10.2-x8664-bios.img
+          qemu-img convert -O qcow2 "$RAW" openwrt-24.10.2-x8664-bios.qcow2
+          qemu-img convert -O vmdk  "$RAW" openwrt-24.10.2-x8664-bios.vmdk
+          qemu-img convert -O vhdx  "$RAW" openwrt-24.10.2-x8664-bios.vhdx
+          ls -lh
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: openwrt-24.10.2-x86_64-${{ env.PROFILE }}
-          path: ${{ env.IB_DIR }}/bin/targets/*/*/*
+          name: openwrt-24.10.2-x8664-bios-images
+          path: ${{ env.IB_DIR }}/bin/targets/x86/64/openwrt-24.10.2-x8664-bios.*
