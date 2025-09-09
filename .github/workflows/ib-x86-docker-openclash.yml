@@ -4,18 +4,10 @@ on:
   workflow_dispatch:
 
 env:
-  # 官方稳定版 ImageBuilder
   IB_BASE_URL: https://downloads.openwrt.org/releases/24.10.2/targets/x86/64
   IB_FILE: openwrt-imagebuilder-24.10.2-x86-64.Linux-x86_64.tar.zst
-
-  # 产物配置：EFI 可启动，纯 BIOS 改成 generic
   PROFILE: generic-efi
-
-  # 根分区大小（MiB）
   ROOTFS_MB: "1024"
-
-  # 需要预装的软件（单行、用空格分隔）
-  # 注：已包含 dnsmasq-full 并显式移除基础版 dnsmasq/dnsmasq-dhcpv6，避免冲突
   PACKAGES: >-
     dnsmasq-full -dnsmasq -dnsmasq-dhcpv6
     luci luci-base luci-compat
@@ -36,54 +28,47 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
-      - name: Checkout
+      - name: "Checkout"
         uses: actions/checkout@v4
 
-      - name: Prepare host environment
+      - name: "Prepare host environment"
         shell: bash
         run: |
           set -euxo pipefail
           sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
           sudo docker image prune --all --force || true
           sudo -E apt-get -qq update
-          # 必需：zstd、GNU 工具链
           sudo -E apt-get -qq install -y --no-install-recommends \
             build-essential gawk wget curl ca-certificates xz-utils zstd \
             rsync file python3 tar coreutils git
           sudo -E apt-get -qq autoremove --purge -y
           sudo -E apt-get -qq clean
 
-      - name: Download ImageBuilder
+      - name: "Download and extract ImageBuilder"
         shell: bash
         run: |
           set -euxo pipefail
           echo "Base: ${IB_BASE_URL}"
           echo "Downloading: ${IB_BASE_URL}/${IB_FILE}"
           curl -fL --retry 5 -o "${IB_FILE}" "${IB_BASE_URL}/${IB_FILE}"
-          # 解压
           tar --zstd -xf "${IB_FILE}"
-          # 计算 IB 目录名
-          echo "IB_DIR=${IB_FILE%.tar.zst}" >> $GITHUB_ENV
+          IB_DIR="${IB_FILE%.tar.zst}"
+          echo "IB_DIR=${IB_DIR}" >> "$GITHUB_ENV"
+          test -d "${IB_DIR}"
 
-      - name: Print IB dir
-        shell: bash
-        run: |
-          echo "IB_DIR=$IB_DIR"
-          test -d "$IB_DIR"
-
-      - name: Put custom files (optional)
-        # 如果仓库根目录有 files/，会被打进固件
-        shell: bash
-        run: |
-          if [ -d "files" ]; then
-            rsync -a files/ "$IB_DIR/files/"
-          fi
-
-      - name: Switch to ext4 + set 1GiB rootfs
-        working-directory: ${{ env.IB_DIR }}
+      - name: "Put custom files (optional)"
         shell: bash
         run: |
           set -euxo pipefail
+          if [ -d "files" ]; then
+            rsync -a files/ "${IB_DIR}/files/"
+          fi
+
+      - name: "Switch to ext4 and set rootfs size"
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd "${IB_DIR}"
           {
             echo 'CONFIG_TARGET_ROOTFS_EXT4FS=y'
             echo '# CONFIG_TARGET_ROOTFS_SQUASHFS is not set'
@@ -91,54 +76,51 @@ jobs:
           } >> .config
           make defconfig
 
-      - name: Preflight: prune non-existent packages automatically
-        working-directory: ${{ env.IB_DIR }}
+      - name: "Preflight - prune missing packages automatically"
         shell: bash
-        env:
-          PROFILE: ${{ env.PROFILE }}
-          PACKAGES: ${{ env.PACKAGES }}
         run: |
           set -euxo pipefail
-          LEFT="$PACKAGES"
-          echo "PACKAGES(before)=$LEFT"
+          cd "${IB_DIR}"
+          LEFT="${PACKAGES}"
+          echo "PACKAGES(before)=${LEFT}"
 
-          # 尝试最多 3 轮剔除不存在的包
+          # 最多尝试 3 轮：识别并剔除仓库不存在的包
           for i in 1 2 3; do
-            if make -s manifest PROFILE="$PROFILE" PACKAGES="$LEFT" > _manifest.log 2>&1; then
-              echo "Manifest check OK (round $i)"
+            if make -s manifest PROFILE="${PROFILE}" PACKAGES="${LEFT}" > _manifest.log 2>&1; then
+              echo "Manifest check OK (round ${i})"
               break
             fi
             MISS=$(awk '/Cannot install package/{print $5}' _manifest.log | sort -u | xargs || true)
-            if [ -z "$MISS" ]; then
-              echo "Manifest failed but no 'Cannot install package ...' lines found"; break
+            if [ -z "${MISS}" ]; then
+              echo "Manifest failed but no 'Cannot install package ...' lines found"
+              break
             fi
-            echo "Round $i remove missing pkgs: $MISS"
-            for m in $MISS; do
-              LEFT="$(echo " $LEFT " | sed "s/ $m / /g" | xargs echo)"
+            echo "Round ${i} remove missing pkgs: ${MISS}"
+            for m in ${MISS}; do
+              LEFT="$(echo " ${LEFT} " | sed "s/ ${m} / /g" | xargs echo)"
             done
           done
 
-          echo "PACKAGES(final)=$LEFT"
-          echo "PACKAGES_FINAL=$LEFT" >> $GITHUB_ENV
+          echo "PACKAGES(final)=${LEFT}"
+          echo "PACKAGES_FINAL=${LEFT}" >> "$GITHUB_ENV"
 
-      - name: Build image (ext4, ${PROFILE})
-        working-directory: ${{ env.IB_DIR }}
+      - name: "Build image ext4 on selected profile"
         shell: bash
-        env:
-          PROFILE: ${{ env.PROFILE }}
-          PACKAGES_FINAL: ${{ env.PACKAGES_FINAL }}
         run: |
           set -euxo pipefail
-          make -j"$(nproc)" image PROFILE="$PROFILE" PACKAGES="$PACKAGES_FINAL" FILES=files
+          cd "${IB_DIR}"
+          echo "PROFILE=${PROFILE}"
+          echo "PACKAGES_FINAL=${PACKAGES_FINAL}"
+          make -j"$(nproc)" image PROFILE="${PROFILE}" PACKAGES="${PACKAGES_FINAL}" FILES=files
 
-      - name: Collect artifacts
+      - name: "Collect artifacts"
         shell: bash
         run: |
           set -euxo pipefail
           mkdir -p out
-          cp -av $IB_DIR/bin/targets/x86/64/* out/
+          cp -av "${IB_DIR}/bin/targets/x86/64/"* out/
 
-      - name: Upload artifacts
+      - name: "Upload artifacts"
         uses: actions/upload-artifact@v4
         with:
           name: openwrt-x86_64-24.10.2-ext4-${{ env.PROFILE }}
