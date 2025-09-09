@@ -28,10 +28,10 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
-      - name: "Checkout"
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: "Prepare host environment"
+      - name: Prepare host
         shell: bash
         run: |
           set -euxo pipefail
@@ -44,7 +44,7 @@ jobs:
           sudo -E apt-get -qq autoremove --purge -y
           sudo -E apt-get -qq clean
 
-      - name: "Download and extract ImageBuilder"
+      - name: Download & extract ImageBuilder
         shell: bash
         run: |
           set -euxo pipefail
@@ -56,7 +56,7 @@ jobs:
           echo "IB_DIR=${IB_DIR}" >> "$GITHUB_ENV"
           test -d "${IB_DIR}"
 
-      - name: "Put custom files (optional)"
+      - name: Put custom files (optional)
         shell: bash
         run: |
           set -euxo pipefail
@@ -64,63 +64,52 @@ jobs:
             rsync -a files/ "${IB_DIR}/files/"
           fi
 
-      - name: "Switch to ext4 and set rootfs size"
-        shell: bash
-        run: |
-          set -euxo pipefail
-          cd "${IB_DIR}"
-          {
-            echo 'CONFIG_TARGET_ROOTFS_EXT4FS=y'
-            echo '# CONFIG_TARGET_ROOTFS_SQUASHFS is not set'
-            echo "CONFIG_TARGET_ROOTFS_PARTSIZE=${ROOTFS_MB}"
-          } >> .config
-          make defconfig
-
-      - name: "Preflight - prune missing packages automatically"
+      - name: Preflight - prune missing packages
         shell: bash
         run: |
           set -euxo pipefail
           cd "${IB_DIR}"
           LEFT="${PACKAGES}"
           echo "PACKAGES(before)=${LEFT}"
-
-          # 最多尝试 3 轮：识别并剔除仓库不存在的包
           for i in 1 2 3; do
             if make -s manifest PROFILE="${PROFILE}" PACKAGES="${LEFT}" > _manifest.log 2>&1; then
-              echo "Manifest check OK (round ${i})"
-              break
+              echo "Manifest OK (round ${i})"; break
             fi
             MISS=$(awk '/Cannot install package/{print $5}' _manifest.log | sort -u | xargs || true)
             if [ -z "${MISS}" ]; then
-              echo "Manifest failed but no 'Cannot install package ...' lines found"
-              break
+              echo "Manifest failed but no 'Cannot install package ...' lines found"; break
             fi
-            echo "Round ${i} remove missing pkgs: ${MISS}"
+            echo "Round ${i} remove: ${MISS}"
             for m in ${MISS}; do
               LEFT="$(echo " ${LEFT} " | sed "s/ ${m} / /g" | xargs echo)"
             done
           done
-
           echo "PACKAGES(final)=${LEFT}"
           echo "PACKAGES_FINAL=${LEFT}" >> "$GITHUB_ENV"
 
-      - name: "Build image ext4 on selected profile"
+      - name: Build image (ext4, rootfs=${{ env.ROOTFS_MB }}MiB)
         shell: bash
         run: |
           set -euxo pipefail
           cd "${IB_DIR}"
           echo "PROFILE=${PROFILE}"
           echo "PACKAGES_FINAL=${PACKAGES_FINAL}"
-          make -j"$(nproc)" image PROFILE="${PROFILE}" PACKAGES="${PACKAGES_FINAL}" FILES=files
+          make -j"$(nproc)" image \
+            PROFILE="${PROFILE}" \
+            PACKAGES="${PACKAGES_FINAL}" \
+            FILES=files \
+            CONFIG_TARGET_ROOTFS_EXT4FS=y \
+            CONFIG_TARGET_ROOTFS_SQUASHFS=n \
+            CONFIG_TARGET_ROOTFS_PARTSIZE="${ROOTFS_MB}"
 
-      - name: "Collect artifacts"
+      - name: Collect artifacts
         shell: bash
         run: |
           set -euxo pipefail
           mkdir -p out
           cp -av "${IB_DIR}/bin/targets/x86/64/"* out/
 
-      - name: "Upload artifacts"
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: openwrt-x86_64-24.10.2-ext4-${{ env.PROFILE }}
